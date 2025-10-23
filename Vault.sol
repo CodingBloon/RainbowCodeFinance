@@ -5,6 +5,7 @@
 //100% = 1,000,000 Basis Points
 
 pragma solidity 0.8.30;
+pragma experimental ABIEncoderV2;
 
 import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/ERC20/extensions/ERC4626.sol";
 import "https://github.com/aerodrome-finance/contracts/blob/main/contracts/interfaces/IRouter.sol";
@@ -21,6 +22,8 @@ import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
     Formula to calculate share value: (Total Value Locked)/(Total Shares)
     Formula to calculate return amount of token: (Total Token Balance)/(Total Shares)
     Protocol Fee (on deposit): 0,02% (200 Basis Points)
+
+    Withdraw and deposit functions work
 */
 
 contract Vault is ERC4626 {
@@ -52,7 +55,7 @@ contract Vault is ERC4626 {
         uint256 _slippageTolerance,
         uint256 _entryFeeBasisPoints
     ) ERC4626(ERC20(_asset)) ERC20(_name, _symbol) {
-        require(_slippageTolerance <= 50, "Slippage Tolerance must be less than or equal to 5%");
+        require(_slippageTolerance <= 1, "Slippage Tolerance must be less than or equal to 1%");
         description = _description; //set description of vault
         vaultOwner = msg.sender; //set creator as owner of vault
         principalToken = _asset; //define principal token
@@ -61,8 +64,6 @@ contract Vault is ERC4626 {
         principalToken = _asset; //set principal token
 
         registerTokens(_tokens);
-
-        SafeERC20.safeTransfer(IERC20(_asset), msg.sender, 1);
     }
 
     // Registers tokens in the vault and ensures that the weights sum up to 100%
@@ -149,7 +150,7 @@ contract Vault is ERC4626 {
         address mPrincipalToken = principalToken; //load principalToken from storage into memory
         for(uint i = 0; i < length;) {
             address token = tokens[i].token;
-            if(token == principalToken) {
+            if(token == mPrincipalToken) {
                 uint256 amount = Math.mulDiv(IERC20(token).balanceOf(address(this)), totalSupply(), shares, Math.Rounding.Ceil);
                 //uint256 amount = IERC20(token).balanceOf(address(this)) / totalSupply() * shares; //amount of principalToken to pay out
                 SafeERC20.safeTransfer(IERC20(mPrincipalToken), msg.sender, amount);
@@ -170,7 +171,7 @@ contract Vault is ERC4626 {
         for(uint i = 0; i < length;) {
             Token memory tokenStruct = tokens[i];
             address token = tokenStruct.token;
-            if(token == principalToken) {
+            if(token == mPrincipalToken) {
                 uint256 amount = assets * tokenStruct.weight;
                 SafeERC20.safeTransfer(IERC20(mPrincipalToken), address(this), amount);
             } else {
@@ -195,7 +196,6 @@ contract Vault is ERC4626 {
 
         uint256 shares = previewDeposit(assets);
         _deposit(_msgSender(), receiver, assets, shares);
-        afterDeposit(assets);
 
         return shares;
     }
@@ -208,7 +208,6 @@ contract Vault is ERC4626 {
         }
 
         uint256 assets = previewMint(shares);
-        beforeWithdraw(assets, shares);
         _deposit(_msgSender(), receiver, assets, shares);
 
         return assets;
