@@ -23,6 +23,7 @@ contract Vault is ERC4626 {
     event UpdatedFactory(address oldFactory, address newFactory);
     event ChangedOwner(address oldOwner, address newOwner);
     event ChangedSlippage(uint256 oldSlippage, uint256 newSlippage);
+    event DescriptionChanged(string oldDescription, string newDescription);
 
     //Errors
     //User tried to do an action he was not allowed to do
@@ -31,6 +32,7 @@ contract Vault is ERC4626 {
     error SameTokenSwap(address tokenIn, address tokenOut);
     error InvalidMultiSwap(uint256 tokensOut, uint256 amountsIn);
     error MultiSwapTooLarge(uint256 numberOfTokens);
+    error InvalidOwner(address owner);
 
     constructor( 
         string memory _name, 
@@ -73,8 +75,15 @@ contract Vault is ERC4626 {
     }
 
     function changeOwner(address newOwner) public onlyOwner {
+        if(newOwner == address(0))
+            revert InvalidOwner(newOwner);
         emit ChangedOwner(vaultOwner, newOwner);
         vaultOwner = newOwner;
+    }
+
+    function changeDescription(string memory _description) public onlyOwner {
+        emit DescriptionChanged(description, _description);
+        description = _description;
     }
 
     function getAmount(address token, uint256 shares) internal view returns (uint256) {
@@ -155,7 +164,10 @@ contract Vault is ERC4626 {
     function afterDeposit(uint256 assets) internal virtual {}
     function beforeWithdraw(uint256 assets, uint256 shares) internal virtual {}
 
-    //swap tokens on Aerodrome
+     /* ============================================================
+                Swap functions
+       ============================================================ */
+
     function swap(address tokenIn, address tokenOut, uint256 amountIn, address receiver) internal returns(uint256[] memory amounts) {
         if(tokenIn == tokenOut) //check if tokenIn and TokenOut are the same
             revert SameTokenSwap(tokenIn, tokenOut);  //revert if they are the same token
