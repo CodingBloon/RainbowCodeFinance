@@ -1,192 +1,93 @@
-// SPDX-License-Identifier: GPL-3.0
-
-//0.0001% = 1 Basis Point
-//1% = 10,000 Basis Points
-//100% = 1,000,000 Basis Points
-
+// SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
-pragma experimental ABIEncoderV2;
 
 import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/ERC20/extensions/ERC4626.sol";
 import "https://github.com/aerodrome-finance/contracts/blob/main/contracts/interfaces/IRouter.sol";
-import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
-
-/*
-    This is a vault contract that allows users to deposit and withdraw tokens.
-    It is an ERC4626 token contract that allows users to deposit and withdraw tokens.
-    It is a non-reentrant contract that allows users to deposit and withdraw tokens.
-    It is a pausable contract that allows users to deposit and withdraw tokens.
-    It is a burnable contract that allows users to deposit and withdraw tokens.
-    It is a mintable contract that allows users to deposit and withdraw tokens
-
-    Formula to calculate share value: (Total Value Locked)/(Total Shares)
-    Formula to calculate return amount of token: (Total Token Balance)/(Total Shares)
-    Protocol Fee (on deposit): 0,02% (200 Basis Points)
-
-    Withdraw and deposit functions work
-*/
 
 contract Vault is ERC4626 {
 
-    string public VaultName;
-    string public description;
     address public vaultOwner;
-    address public principalToken;
-    uint256 slippageTolerance;
-    uint256 public entryFeeBasisPoints;
-    AggregatorV3Interface internal dataFeed = AggregatorV3Interface(0x694AA1769357215DE4FAC081bf1f309aDC325306); //ChainLink Oracle for Prices
 
-    IRouter constant aeroRouter = IRouter(address(0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43)); //Aerodrome Router
-    address public constant factory = address(0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A); //Aerodrome Factory
+    string description;
+    uint256 public feeBasisPoints;
+    uint256 public slippageTolerance;
 
-    struct Token {
-        address token;
-        uint256 weight;
-    }
+    IRouter aeroRouter = IRouter(address(0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43)); //Aerodrome Router
+    address public factory = address(0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A); //Aerodrome Factory
 
-    Token[] tokens;
+    //events for EVM logging
+    event Deposit(address user, uint256 amount, uint256 minted);
+    event Withdraw(address user, uint256 burned);
+    event FeeLevelChanged(uint256 oldFeeLevel, uint256 newFeeLevel);
+    event UpdatedRouter(address oldRouter, address newRouter);
+    event UpdatedFactory(address oldFactory, address newFactory);
+    event ChangedOwner(address oldOwner, address newOwner);
+    event ChangedSlippage(uint256 oldSlippage, uint256 newSlippage);
 
-    constructor(
-        address _asset,
-        string memory _name,
+    //Errors
+    //User tried to do an action he was not allowed to do
+    error UnauthorizedActionByAccount(address caller);
+    error InvalidFeeBasisPoints(uint256 feeBasisPoints);
+    error SameTokenSwap(address tokenIn, address tokenOut);
+    error InvalidMultiSwap(uint256 tokensOut, uint256 amountsIn);
+    error MultiSwapTooLarge(uint256 numberOfTokens);
+
+    constructor( 
+        string memory _name, 
         string memory _symbol,
         string memory _description,
-        Token[] memory _tokens,
-        uint256 _slippageTolerance,
-        uint256 _entryFeeBasisPoints
-    ) ERC4626(ERC20(_asset)) ERC20(_name, _symbol) {
-        require(_slippageTolerance <= 1, "Slippage Tolerance must be less than or equal to 1%");
-        description = _description; //set description of vault
-        vaultOwner = msg.sender; //set creator as owner of vault
-        principalToken = _asset; //define principal token
-        slippageTolerance = _slippageTolerance; //set slippage tolerance
-        entryFeeBasisPoints = _entryFeeBasisPoints; //set entry fee
-        principalToken = _asset; //set principal token
-
-        registerTokens(_tokens);
+        uint256 _feeBasisPoints,
+        uint256 _slippageTolerance) ERC4626(ERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913)) ERC20(_name, _symbol) {
+            description = _description;
+            feeBasisPoints = _feeBasisPoints;
+            slippageTolerance = _slippageTolerance;
+            vaultOwner = msg.sender;
     }
 
-    // Registers tokens in the vault and ensures that the weights sum up to 100%
-    function registerTokens(Token[] memory _tokens) internal {
-        uint length = _tokens.length;
-        require(length <= 15, "Vault can hold a maximum of 15 tokens");
-
-        uint256 sum = 0;
-        for(uint i = 0; i < length;) {
-            Token memory token = _tokens[i];
-            require(token.weight > 0, "Weight of a token cannot be zero");
-
-            tokens.push(token);
-            sum += token.weight;
-
-            unchecked {
-                ++i;
-            }
-        }
-
-        require(sum == 1e18, "Weights of tokens must sum up to 100%");
+    modifier onlyOwner {
+        checkOwner();
+        _;
     }
 
-    /* ////////////////////////////////////////////////////////////////////////////
-                        Fee Logic for Deposit and mint
-       //////////////////////////////////////////////////////////////////////////// */
-
-    function previewDeposit(uint256 assets) public view override returns (uint256) {
-        uint256 fee = _feeOnTotal(assets);
-        return super.previewDeposit(assets - fee);
+    function checkOwner() internal view {
+        if(vaultOwner != _msgSender())
+            revert UnauthorizedActionByAccount(_msgSender());
     }
 
-    function previewMint(uint256 shares) public view override returns (uint256) {
-        uint256 assets = super.previewMint(shares);
-        return assets + _feeOnRaw(assets);
+    function setFeeLevel(uint256 _feeBasisPoints) onlyOwner public{
+        if(_feeBasisPoints > (5 * (10 ** 16))) //max fee level for all vaults is 5%
+            revert InvalidFeeBasisPoints(_feeBasisPoints);
+
+        emit FeeLevelChanged(feeBasisPoints, _feeBasisPoints);
+        feeBasisPoints = _feeBasisPoints;
     }
 
-    function _feeOnTotal(uint256 assets) private pure returns (uint256) {
-        return Math.mulDiv(assets, 200, 20 + (10 ** 6), Math.Rounding.Ceil);
+    function updateAerodromeRouter(address newRouter) public onlyOwner {
+        emit UpdatedRouter(address(aeroRouter), newRouter);
+        aeroRouter = IRouter(newRouter);
     }
 
-    function _feeOnRaw(uint256 assets) private pure returns (uint256) {
-        return Math.mulDiv(assets, 200, 10 ** 6, Math.Rounding.Ceil);
+    function updateAerodromeFactory(address newFactory) public onlyOwner {
+        emit UpdatedFactory(factory, newFactory);
+        factory = newFactory;
     }
 
-    function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
-        uint256 fee = _feeOnTotal(assets);
-
-        super._deposit(caller, receiver, assets, shares);
-        if(fee > 0)
-            SafeERC20.safeTransfer(IERC20(principalToken), vaultOwner, fee);
-    } 
-
-    /*  ////////////////////////////////////////////////////////////////////////////
-                        Logic to get balance for smart contract
-        //////////////////////////////////////////////////////////////////////////// */
-    function getTokenValue(address token) public view returns(uint256) {
-        //TODO: Implement Aerodrome Finance Spot Price Method (to get Spot Price for Token Pair [Token & Principal Token])
-        uint256 price = 1;
-        return IERC20(token).balanceOf(address(this)) * price;
+    function changeOwner(address newOwner) public onlyOwner {
+        emit ChangedOwner(vaultOwner, newOwner);
+        vaultOwner = newOwner;
     }
 
-    function totalAssets() public view override returns(uint256) {
-        uint256 total;
-        uint length = tokens.length;
-
-        for(uint i = 0; i < length;) {
-            total += getTokenValue(tokens[i].token);
-            unchecked {
-                ++i;
-            }
-        }
-
-        return total;
+    function getAmount(address token, uint256 shares) internal view returns (uint256) {
+        return Math.mulDiv(
+            IERC20(token).balanceOf(address(this)),  //balance of token in contract
+            totalSupply(),  //total supply of vault
+            shares  //shares of vault
+        );
     }
 
-    
-    /*  ////////////////////////////////////////////////////////////////////////////
-                    Hooks into withdraw and deposit methods
-    //////////////////////////////////////////////////////////////////////////// */
-
-    function beforeWithdraw(uint256 assets, uint256 shares) internal {
-        uint length = tokens.length;
-        address mPrincipalToken = principalToken; //load principalToken from storage into memory
-        for(uint i = 0; i < length;) {
-            address token = tokens[i].token;
-            if(token == mPrincipalToken) {
-                uint256 amount = Math.mulDiv(IERC20(token).balanceOf(address(this)), totalSupply(), shares, Math.Rounding.Ceil);
-                //uint256 amount = IERC20(token).balanceOf(address(this)) / totalSupply() * shares; //amount of principalToken to pay out
-                SafeERC20.safeTransfer(IERC20(mPrincipalToken), msg.sender, amount);
-            } else {
-                uint256 amount = IERC20(token).balanceOf(address(this)) / totalSupply() * shares; //amount of token 'token' to pay out
-                swap(token, mPrincipalToken, amount, msg.sender);
-            }
-                
-            unchecked {
-                ++i;
-            }
-        }
-    }
-    
-    function afterDeposit(uint256 assets) internal {
-        uint length = tokens.length;
-        address mPrincipalToken = principalToken; //load principalToken from storage into memory
-        for(uint i = 0; i < length;) {
-            Token memory tokenStruct = tokens[i];
-            address token = tokenStruct.token;
-            if(token == mPrincipalToken) {
-                uint256 amount = assets * tokenStruct.weight;
-                SafeERC20.safeTransfer(IERC20(mPrincipalToken), address(this), amount);
-            } else {
-                swap(mPrincipalToken, token, assets, address(this));
-            }
-
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    /*  ////////////////////////////////////////////////////////////////////////////
-                    mint, deposit, withdraw, redeem methods
-    //////////////////////////////////////////////////////////////////////////// */
+    /* ============================================================
+                Functions for deposit and withdraw
+       ============================================================ */
 
     function deposit(uint256 assets, address receiver) public virtual override  returns (uint256) {
         uint256 maxAssets = maxDeposit(receiver);
@@ -196,6 +97,9 @@ contract Vault is ERC4626 {
 
         uint256 shares = previewDeposit(assets);
         _deposit(_msgSender(), receiver, assets, shares);
+        afterDeposit(assets);
+
+        emit Deposit(_msgSender(), assets, shares);
 
         return shares;
     }
@@ -209,6 +113,7 @@ contract Vault is ERC4626 {
 
         uint256 assets = previewMint(shares);
         _deposit(_msgSender(), receiver, assets, shares);
+        afterDeposit(assets);
 
         return assets;
     }
@@ -221,7 +126,10 @@ contract Vault is ERC4626 {
         }
 
         uint256 shares = previewWithdraw(assets);
+        beforeWithdraw(assets, shares);
         _withdraw(_msgSender(), receiver, owner, assets, shares);
+
+        emit Withdraw(_msgSender(), shares);
 
         return shares;
     }
@@ -234,21 +142,26 @@ contract Vault is ERC4626 {
         }
 
         uint256 assets = previewRedeem(shares);
+        beforeWithdraw(assets, shares);
         _withdraw(_msgSender(), receiver, owner, assets, shares);
 
         return assets;
     }
 
-    /*  ////////////////////////////////////////////////////////////////////////////
-                    Logic to swap tokens on Aerodrome Finance
-    //////////////////////////////////////////////////////////////////////////// */
 
+    /* ============================================================
+                Hooks into withdraw and deposit methods
+       ============================================================ */
+    function afterDeposit(uint256 assets) internal virtual {}
+    function beforeWithdraw(uint256 assets, uint256 shares) internal virtual {}
+
+    //swap tokens on Aerodrome
     function swap(address tokenIn, address tokenOut, uint256 amountIn, address receiver) internal returns(uint256[] memory amounts) {
-        //tokens are already in contract --> no need to transfer them
-        IERC20 tokenInERC20 = IERC20(tokenIn);
-        
-        //approve router to spend tokens
-        tokenInERC20.approve(address(aeroRouter), amountIn);
+        if(tokenIn == tokenOut) //check if tokenIn and TokenOut are the same
+            revert SameTokenSwap(tokenIn, tokenOut);  //revert if they are the same token
+
+        IERC20 ERCToken = IERC20(tokenIn);
+        ERCToken.approve(address(aeroRouter), amountIn); //approve router to spend tokens
 
         //create dynamic array of RouteStruct and add path
         IRouter.Route[] memory routes = new IRouter.Route[](1);
@@ -259,31 +172,41 @@ contract Vault is ERC4626 {
         //execute trade on aerodrome finance
         amounts = aeroRouter.swapExactTokensForTokens(
             amountIn,  //amount of token we want to swap
-            returnAmounts[1] * (1000 - slippageTolerance) / 1000,  //min amount we want back (- slippage tolerance (e.g. 5 Basis Points (0.5%)))
+            returnAmounts[1] * (1e18 - slippageTolerance) / 1e18,  //min amount we want back (- slippage tolerance (e.g. 5 Basis Points (0.5%)))
             routes,  //trade path
             receiver,  //receiver of tokens
-            block.timestamp + 30 //deadline for trade
+            block.timestamp + 300 //deadline for trade
         );
         return amounts;
     }
 
-    /*  ////////////////////////////////////////////////////////////////////////////
-                    Logic to modify vault settings
-    //////////////////////////////////////////////////////////////////////////// */
-    function transferOwnership(address newOwner) public onlyOwner {
-        vaultOwner = newOwner;
+    function validateSwap(uint256 tokens, uint256 amounts) internal pure {
+        if(tokens > 10) //check if tokens is greater than 10
+            revert MultiSwapTooLarge(tokens); //revert if tokens is greater than 10 (arbitrary limit to prevent gas issues)
+        
+        if(tokens != amounts) //check if tokens and amounts are the same length
+            revert InvalidMultiSwap(tokens, amounts); //revert if they are not the same length
     }
 
-    function setSlippage(uint256 slippage) public onlyOwner {
-        slippageTolerance = slippage;
+    function swapFromTokenToTokens(address tokenIn, address[] memory tokensOut, uint256[] memory amountsIn) internal returns(uint256[] memory amountOut){
+        uint tokensOutLength = tokensOut.length;
+        uint amountsInLength = amountsIn.length;
+        
+        validateSwap(tokensOutLength, amountsInLength); //validate swap
+        
+        for(uint i = 0; i < tokensOutLength; ++i) {
+            amountOut[i] = swap(tokenIn, tokensOut[i], amountsIn[i], address(this))[1];
+        }
     }
+    
+    function swapFromTokensToToken(address[] memory tokensIn, address tokenOut, uint256[] memory amountsIn) internal returns(uint256 amountOut) {
+        uint tokensInLength = tokensIn.length;
+        uint amountsInLength = amountsIn.length;
+        validateSwap(tokensInLength, amountsInLength); //validate swap
+        
 
-    function setEntryFee(uint256 fee) public onlyOwner {
-        entryFeeBasisPoints = fee;
-    }
-
-    modifier onlyOwner {
-        require(msg.sender == vaultOwner, "Only the vault owner can access this function");
-        _;
+        for(uint i = 0; i < tokensInLength; ++i) {
+            amountOut += swap(tokensIn[i], tokenOut, amountsIn[i], address(this))[1];
+        }
     }
 }
