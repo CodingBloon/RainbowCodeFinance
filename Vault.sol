@@ -6,11 +6,17 @@ import "https://github.com/aerodrome-finance/contracts/blob/main/contracts/inter
 
 contract Vault is ERC4626 {
 
-    address public vaultOwner;
+    struct Asset {
+        address token;
+        uint256 weight;
+    }
 
-    string description;
-    uint256 public feeBasisPoints;
-    uint256 public slippageTolerance;
+    address public vaultOwner; //Owner of Vault
+    string public description; //Description for Vault
+    uint256 public feeBasisPoints; //Fee for Vault (in basis points)
+    uint256 public slippageTolerance; //Slippage Tolerance (in basis points)
+
+    Asset[] assets;
 
     IRouter aeroRouter = IRouter(address(0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43)); //Aerodrome Router
     address public factory = address(0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A); //Aerodrome Factory
@@ -110,6 +116,29 @@ contract Vault is ERC4626 {
         );
     }
 
+    function buildZapInParameters(uint256 _assets) internal view returns(address[] memory tokens, uint256[] memory amounts) {
+        uint assetsLength = assets.length;
+        for(uint i = 0; i < assetsLength; ++i) {
+            Asset memory asset = assets[i];
+            tokens[i] = asset.token;
+            //_assets * weight / 1e18
+            amounts[i] = Math.mulDiv(_assets, asset.weight, 1e18);
+        }
+
+        return (tokens, amounts);
+    }
+
+    function buildZapOutParameters(uint256 shares) internal view returns(address[] memory tokens, uint256[] memory amounts) {
+        uint assetsLength = assets.length;
+        for(uint i = 0; i < assetsLength; ++i) {
+            Asset memory asset = assets[i];
+            tokens[i] = asset.token;
+            amounts[i] = getAmount(asset.token, shares);
+        }
+
+        return (tokens, amounts);
+    }
+
     /* ============================================================
                 Functions for deposit and withdraw
        ============================================================ */
@@ -177,8 +206,20 @@ contract Vault is ERC4626 {
     /* ============================================================
                 Hooks into withdraw and deposit methods
        ============================================================ */
-    function afterDeposit(uint256 assets) internal virtual {}
-    function beforeWithdraw(uint256 assets, uint256 shares) internal virtual {}
+    function afterDeposit(uint256 _assets) internal virtual {
+        (address[] memory tokens, uint256[] memory amounts) = buildZapInParameters(_assets);
+
+        swapFromTokenToTokens(address(0), tokens, amounts);
+    }
+
+    function beforeWithdraw(uint256 _assets, uint256 shares) internal virtual {
+        (address[] memory tokens, uint256[] memory amounts) = buildZapOutParameters(shares);
+
+        uint256 swapped = swapFromTokensToToken(tokens, address(0), amounts);
+
+        //send principal token
+        SafeERC20.safeTransfer(IERC20(address(0)), _msgSender(), swapped);
+    }
 
      /* ============================================================
                 Swap functions
@@ -211,12 +252,12 @@ contract Vault is ERC4626 {
         return amounts;
     }
 
-    function validateSwap(uint256 tokens, uint256 amounts) internal pure {
-        if(tokens > 10) //check if tokens is greater than 10
-            revert MultiSwapTooLarge(tokens); //revert if tokens is greater than 10 (arbitrary limit to prevent gas issues)
+    function validateSwap(uint256 numberOfTokens, uint256 amounts) internal pure {
+        if(numberOfTokens > 10) //check if tokens is greater than 10
+            revert MultiSwapTooLarge(numberOfTokens); //revert if tokens is greater than 10 (arbitrary limit to prevent gas issues)
         
-        if(tokens != amounts) //check if tokens and amounts are the same length
-            revert InvalidMultiSwap(tokens, amounts); //revert if they are not the same length
+        if(numberOfTokens != amounts) //check if tokens and amounts are the same length
+            revert InvalidMultiSwap(numberOfTokens, amounts); //revert if they are not the same length
     }
 
     function swapFromTokenToTokens(address tokenIn, address[] memory tokensOut, uint256[] memory amountsIn) internal returns(uint256[] memory amountOut){
