@@ -26,13 +26,15 @@ contract Vault is ERC4626 {
     event DescriptionChanged(string oldDescription, string newDescription);
 
     //Errors
-    //User tried to do an action he was not allowed to do
-    error UnauthorizedActionByAccount(address caller);
-    error InvalidFeeBasisPoints(uint256 feeBasisPoints);
-    error SameTokenSwap(address tokenIn, address tokenOut);
-    error InvalidMultiSwap(uint256 tokensOut, uint256 amountsIn);
-    error MultiSwapTooLarge(uint256 numberOfTokens);
-    error InvalidOwner(address owner);
+    error UnauthorizedActionByAccount(address caller); //unauthorized action
+    error InvalidFeeBasisPoints(uint256 feeBasisPoints); //invalid fee basis points
+    error SameTokenSwap(address tokenIn, address tokenOut); //same token swap (not allowed)
+    error InvalidMultiSwap(uint256 tokensOut, uint256 amountsIn); //invalid multi-swap (tokensOut and amountsIn are not same length)
+    error MultiSwapTooLarge(uint256 numberOfTokens); //invalid multi-swap (multi-swap was too large [max 10 Tokens])
+    error InvalidOwner(address owner); //same owner transfership (not allowed)
+    error InvalidTokenSwap(address tokenIn, address tokenOut); //invalid token swap (tokenOut or tokenIn is not a valid token)
+    error InvalidSlippage(uint256 slippage); //slippage exceeded 5%
+    error InvalidAddress(address aaddress); //address was 0x0000000000000000000000000000000000000000
 
     constructor( 
         string memory _name, 
@@ -64,26 +66,40 @@ contract Vault is ERC4626 {
         feeBasisPoints = _feeBasisPoints;
     }
 
-    function updateAerodromeRouter(address newRouter) public onlyOwner {
-        emit UpdatedRouter(address(aeroRouter), newRouter);
-        aeroRouter = IRouter(newRouter);
+    function updateAerodromeRouter(address _aeroRouter) public onlyOwner {
+        if(_aeroRouter == address(0))
+            revert InvalidAddress(_aeroRouter);
+        emit UpdatedRouter(address(aeroRouter), _aeroRouter);
+        aeroRouter = IRouter(_aeroRouter);
     }
 
-    function updateAerodromeFactory(address newFactory) public onlyOwner {
-        emit UpdatedFactory(factory, newFactory);
-        factory = newFactory;
+    function updateAerodromeFactory(address _factory) public onlyOwner {
+        if(_factory == address(0))
+            revert InvalidAddress(_factory);
+        emit UpdatedFactory(factory, _factory);
+        factory = _factory;
     }
 
-    function changeOwner(address newOwner) public onlyOwner {
-        if(newOwner == address(0))
-            revert InvalidOwner(newOwner);
-        emit ChangedOwner(vaultOwner, newOwner);
-        vaultOwner = newOwner;
+    function changeOwner(address _owner) public onlyOwner {
+        if(_owner == address(0))
+            revert InvalidAddress(_owner);
+        if(vaultOwner == _owner) //check for 0 address and same address transfers
+            revert InvalidOwner(_owner);
+        emit ChangedOwner(vaultOwner, _owner);
+        vaultOwner = _owner;
     }
 
     function changeDescription(string memory _description) public onlyOwner {
         emit DescriptionChanged(description, _description);
         description = _description;
+    }
+
+    function updateSlippage(uint256 _slippageTolerance) public onlyOwner {
+        if(_slippageTolerance > 5e16) //5% max tolerance
+            revert InvalidSlippage(_slippageTolerance); //revert if slippageTolerance exceeds 5%
+
+        emit ChangedSlippage(slippageTolerance, _slippageTolerance);
+        slippageTolerance = _slippageTolerance;
     }
 
     function getAmount(address token, uint256 shares) internal view returns (uint256) {
@@ -171,6 +187,9 @@ contract Vault is ERC4626 {
     function swap(address tokenIn, address tokenOut, uint256 amountIn, address receiver) internal returns(uint256[] memory amounts) {
         if(tokenIn == tokenOut) //check if tokenIn and TokenOut are the same
             revert SameTokenSwap(tokenIn, tokenOut);  //revert if they are the same token
+
+        if(tokenIn == address(0) || tokenOut == address(0))
+            revert InvalidTokenSwap(tokenIn, tokenOut);
 
         IERC20 ERCToken = IERC20(tokenIn);
         ERCToken.approve(address(aeroRouter), amountIn); //approve router to spend tokens
