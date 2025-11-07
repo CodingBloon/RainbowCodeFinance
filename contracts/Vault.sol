@@ -6,11 +6,17 @@ import "https://github.com/aerodrome-finance/contracts/blob/main/contracts/inter
 
 contract Vault is ERC4626 {
 
-    address public vaultOwner;
+    struct Asset {
+        address token;
+        uint256 weight;
+    }
 
-    string description;
-    uint256 public feeBasisPoints;
-    uint256 public slippageTolerance;
+    address public vaultOwner; //Owner of Vault
+    string public description; //Description for Vault
+    uint256 public feeBasisPoints; //Fee for Vault (in basis points)
+    uint256 public slippageTolerance; //Slippage Tolerance (in basis points)
+
+    Asset[] assets;
 
     IRouter aeroRouter = IRouter(address(0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43)); //Aerodrome Router
     address public factory = address(0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A); //Aerodrome Factory
@@ -26,13 +32,15 @@ contract Vault is ERC4626 {
     event DescriptionChanged(string oldDescription, string newDescription);
 
     //Errors
-    //User tried to do an action he was not allowed to do
-    error UnauthorizedActionByAccount(address caller);
-    error InvalidFeeBasisPoints(uint256 feeBasisPoints);
-    error SameTokenSwap(address tokenIn, address tokenOut);
-    error InvalidMultiSwap(uint256 tokensOut, uint256 amountsIn);
-    error MultiSwapTooLarge(uint256 numberOfTokens);
-    error InvalidOwner(address owner);
+    error UnauthorizedActionByAccount(address caller); //unauthorized action
+    error InvalidFeeBasisPoints(uint256 feeBasisPoints); //invalid fee basis points
+    error SameTokenSwap(address tokenIn, address tokenOut); //same token swap (not allowed)
+    error InvalidMultiSwap(uint256 tokensOut, uint256 amountsIn); //invalid multi-swap (tokensOut and amountsIn are not same length)
+    error MultiSwapTooLarge(uint256 numberOfTokens); //invalid multi-swap (multi-swap was too large [max 10 Tokens])
+    error InvalidOwner(address owner); //same owner transfership (not allowed)
+    error InvalidTokenSwap(address tokenIn, address tokenOut); //invalid token swap (tokenOut or tokenIn is not a valid token)
+    error InvalidSlippage(uint256 slippage); //slippage exceeded 5%
+    error InvalidAddress(address aaddress); //address was 0x0000000000000000000000000000000000000000
 
     constructor( 
         string memory _name, 
@@ -64,26 +72,40 @@ contract Vault is ERC4626 {
         feeBasisPoints = _feeBasisPoints;
     }
 
-    function updateAerodromeRouter(address newRouter) public onlyOwner {
-        emit UpdatedRouter(address(aeroRouter), newRouter);
-        aeroRouter = IRouter(newRouter);
+    function updateAerodromeRouter(address _aeroRouter) public onlyOwner {
+        if(_aeroRouter == address(0))
+            revert InvalidAddress(_aeroRouter);
+        emit UpdatedRouter(address(aeroRouter), _aeroRouter);
+        aeroRouter = IRouter(_aeroRouter);
     }
 
-    function updateAerodromeFactory(address newFactory) public onlyOwner {
-        emit UpdatedFactory(factory, newFactory);
-        factory = newFactory;
+    function updateAerodromeFactory(address _factory) public onlyOwner {
+        if(_factory == address(0))
+            revert InvalidAddress(_factory);
+        emit UpdatedFactory(factory, _factory);
+        factory = _factory;
     }
 
-    function changeOwner(address newOwner) public onlyOwner {
-        if(newOwner == address(0))
-            revert InvalidOwner(newOwner);
-        emit ChangedOwner(vaultOwner, newOwner);
-        vaultOwner = newOwner;
+    function changeOwner(address _owner) public onlyOwner {
+        if(_owner == address(0))
+            revert InvalidAddress(_owner);
+        if(vaultOwner == _owner) //check for 0 address and same address transfers
+            revert InvalidOwner(_owner);
+        emit ChangedOwner(vaultOwner, _owner);
+        vaultOwner = _owner;
     }
 
     function changeDescription(string memory _description) public onlyOwner {
         emit DescriptionChanged(description, _description);
         description = _description;
+    }
+
+    function updateSlippage(uint256 _slippageTolerance) public onlyOwner {
+        if(_slippageTolerance > 5e16) //5% max tolerance
+            revert InvalidSlippage(_slippageTolerance); //revert if slippageTolerance exceeds 5%
+
+        emit ChangedSlippage(slippageTolerance, _slippageTolerance);
+        slippageTolerance = _slippageTolerance;
     }
 
     function getAmount(address token, uint256 shares) internal view returns (uint256) {
@@ -92,6 +114,29 @@ contract Vault is ERC4626 {
             totalSupply(),  //total supply of vault
             shares  //shares of vault
         );
+    }
+
+    function buildZapInParameters(uint256 _assets) internal view returns(address[] memory tokens, uint256[] memory amounts) {
+        uint assetsLength = assets.length;
+        for(uint i = 0; i < assetsLength; ++i) {
+            Asset memory asset = assets[i];
+            tokens[i] = asset.token;
+            //_assets * weight / 1e18
+            amounts[i] = Math.mulDiv(_assets, asset.weight, 1e18);
+        }
+
+        return (tokens, amounts);
+    }
+
+    function buildZapOutParameters(uint256 shares) internal view returns(address[] memory tokens, uint256[] memory amounts) {
+        uint assetsLength = assets.length;
+        for(uint i = 0; i < assetsLength; ++i) {
+            Asset memory asset = assets[i];
+            tokens[i] = asset.token;
+            amounts[i] = getAmount(asset.token, shares);
+        }
+
+        return (tokens, amounts);
     }
 
     /* ============================================================
@@ -161,8 +206,20 @@ contract Vault is ERC4626 {
     /* ============================================================
                 Hooks into withdraw and deposit methods
        ============================================================ */
-    function afterDeposit(uint256 assets) internal virtual {}
-    function beforeWithdraw(uint256 assets, uint256 shares) internal virtual {}
+    function afterDeposit(uint256 _assets) internal virtual {
+        (address[] memory tokens, uint256[] memory amounts) = buildZapInParameters(_assets);
+
+        swapFromTokenToTokens(address(0), tokens, amounts);
+    }
+
+    function beforeWithdraw(uint256 _assets, uint256 shares) internal virtual {
+        (address[] memory tokens, uint256[] memory amounts) = buildZapOutParameters(shares);
+
+        uint256 swapped = swapFromTokensToToken(tokens, address(0), amounts);
+
+        //send principal token
+        SafeERC20.safeTransfer(IERC20(address(0)), _msgSender(), swapped);
+    }
 
      /* ============================================================
                 Swap functions
@@ -171,6 +228,9 @@ contract Vault is ERC4626 {
     function swap(address tokenIn, address tokenOut, uint256 amountIn, address receiver) internal returns(uint256[] memory amounts) {
         if(tokenIn == tokenOut) //check if tokenIn and TokenOut are the same
             revert SameTokenSwap(tokenIn, tokenOut);  //revert if they are the same token
+
+        if(tokenIn == address(0) || tokenOut == address(0))
+            revert InvalidTokenSwap(tokenIn, tokenOut);
 
         IERC20 ERCToken = IERC20(tokenIn);
         ERCToken.approve(address(aeroRouter), amountIn); //approve router to spend tokens
@@ -192,12 +252,12 @@ contract Vault is ERC4626 {
         return amounts;
     }
 
-    function validateSwap(uint256 tokens, uint256 amounts) internal pure {
-        if(tokens > 10) //check if tokens is greater than 10
-            revert MultiSwapTooLarge(tokens); //revert if tokens is greater than 10 (arbitrary limit to prevent gas issues)
+    function validateSwap(uint256 numberOfTokens, uint256 amounts) internal pure {
+        if(numberOfTokens > 10) //check if tokens is greater than 10
+            revert MultiSwapTooLarge(numberOfTokens); //revert if tokens is greater than 10 (arbitrary limit to prevent gas issues)
         
-        if(tokens != amounts) //check if tokens and amounts are the same length
-            revert InvalidMultiSwap(tokens, amounts); //revert if they are not the same length
+        if(numberOfTokens != amounts) //check if tokens and amounts are the same length
+            revert InvalidMultiSwap(numberOfTokens, amounts); //revert if they are not the same length
     }
 
     function swapFromTokenToTokens(address tokenIn, address[] memory tokensOut, uint256[] memory amountsIn) internal returns(uint256[] memory amountOut){
