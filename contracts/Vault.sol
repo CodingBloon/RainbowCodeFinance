@@ -20,6 +20,7 @@ contract Vault is ERC4626 {
 
     IRouter aeroRouter = IRouter(address(0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43)); //Aerodrome Router
     address public factory = address(0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A); //Aerodrome Factory
+    address public FeeManager; //Fee Manager of Rainbow Code Finance Protocol
 
     //events for EVM logging
     event Deposit(address user, uint256 amount, uint256 minted);
